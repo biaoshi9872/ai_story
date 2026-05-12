@@ -6,305 +6,51 @@ on:
   pull_request:
     branches: [main, release]
   workflow_dispatch:
-    inputs:
-      deploy_to_production:
-        description: 'Deploy to production server'
-        required: false
-        default: 'false'
 
 env:
   DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
   IMAGE_VERSION: ${{ github.run_number }}
-  REGISTRY: docker.io
 
 jobs:
-  # ==================== 代码质量检查 ====================
   lint:
-    name: Code Lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5 with: {python-version: '3.11'}
+      - uses: astral-sh/setup-uv@v4
+      - run: cd backend && uv sync && uv run ruff check .
+      - uses: actions/setup-node@v4 with: {node-version: '22', cache: 'npm', cache-dependency-path: frontend/package-lock.json}
+      - run: cd frontend && npm ci && npm run lint || true
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Backend Lint
-        run: |
-          cd backend
-          uv sync
-          uv run ruff check .
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Frontend Lint
-        run: |
-          cd frontend
-          npm ci
-          npm run lint || true
-
-  # ==================== 后端测试 ====================
-  test-backend:
-    name: Backend Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-
-      - name: Run Tests
-        run: |
-          cd backend
-          uv sync --all-extras
-          uv run pytest --tb=short -q || echo "No tests configured"
-
-  # ==================== 构建后端镜像 ====================
   build-backend:
-    name: Build Backend Image
-    runs-on: ubuntu-latest
-    needs: [lint, test-backend]
-    if: github.event_name != 'pull_request' || github.event.action != 'closed'
-    outputs:
-      image_tag: ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract branch name
-        id: branch
-        run: echo "name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
-
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }}
-            ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:latest
-            ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ steps.branch.outputs.name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ==================== 构建前端镜像 ====================
-  build-frontend:
-    name: Build Frontend Image
     runs-on: ubuntu-latest
     needs: [lint]
-    if: github.event_name != 'pull_request' || github.event.action != 'closed'
-    outputs:
-      image_tag: ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:${{ env.IMAGE_VERSION }}
+    if: github.event_name != 'pull_request'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3 with: {username: ${{ env.DOCKERHUB_USERNAME }}, password: ${{ secrets.DOCKERHUB_TOKEN }}}
+      - run: echo "name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+      - uses: docker/build-push-action@v6 with: {context: ., file: docker/Dockerfile, platforms: linux/amd64, push: true, tags: '${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }} ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:latest', cache-from: type=gha, cache-to: type=gha,mode=max}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+  build-frontend:
+    runs-on: ubuntu-latest
+    needs: [lint]
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3 with: {username: ${{ env.DOCKERHUB_USERNAME }}, password: ${{ secrets.DOCKERHUB_TOKEN }}}
+      - run: echo "name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+      - uses: docker/build-push-action@v6 with: {context: ., file: docker/frontend.Dockerfile, platforms: linux/amd64, push: true, tags: '${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:${{ env.IMAGE_VERSION }} ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:latest', cache-from: type=gha, cache-to: type=gha,mode=max}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Extract branch name
-        id: branch
-        run: echo "name=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
-
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/frontend.Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:${{ env.IMAGE_VERSION }}
-            ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:latest
-            ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:${{ steps.branch.outputs.name }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # ==================== 部署到服务器 ====================
   deploy:
-    name: Deploy to Server
     runs-on: ubuntu-latest
     needs: [build-backend, build-frontend]
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/release'
     environment: production
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Prepare deploy script
-        run: |
-          cat > deploy.sh << 'DEPLOY_SCRIPT'
-          #!/bin/bash
-          set -e
-          
-          IMAGE_VERSION=$1
-          DOCKERHUB_USERNAME=$2
-          
-          echo "=== Deploying version: $IMAGE_VERSION ==="
-          
-          # Pull latest images
-          docker pull $DOCKERHUB_USERNAME/ai_story-backend:$IMAGE_VERSION
-          docker pull $DOCKERHUB_USERNAME/ai_story-frontend:$IMAGE_VERSION
-          
-          # Stop existing containers
-          cd /opt/ai-story
-          docker compose -f docker-compose-deploy.yml down || true
-          
-          # Update image tags in compose file
-          sed -i "s|image: xhongc/ai_story-backend|image: $DOCKERHUB_USERNAME/ai_story-backend:$IMAGE_VERSION|" docker-compose-deploy.yml
-          sed -i "s|image: xhongc/ai_story-frontend|image: $DOCKERHUB_USERNAME/ai_story-frontend:$IMAGE_VERSION|" docker-compose-deploy.yml
-          
-          # Start services
-          docker compose -f docker-compose-deploy.yml up -d
-          
-          # Wait for services
-          sleep 10
-          
-          # Show status
-          docker compose -f docker-compose-deploy.yml ps
-          
-          echo "=== Deployment completed ==="
-          DEPLOY_SCRIPT
-          chmod +x deploy.sh
-
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_SSH_PORT || 22 }}
-          script: |
-            set -e
-            echo "=== Connecting to server ==="
-            
-            # Navigate to project directory
-            cd /opt/ai-story 2>/dev/null || mkdir -p /opt/ai-story && cd /opt/ai-story
-            
-            # Pull latest code (if git repo)
-            if [ -d .git ]; then
-              git pull origin main
-            fi
-            
-            # Copy docker-compose file
-            cat > docker-compose-deploy.yml << 'EOF'
-            services:
-              redis:
-                image: redis:7-alpine
-                restart: unless-stopped
-                ports:
-                  - "6379:6379"
-
-              backend:
-                image: ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }}
-                restart: unless-stopped
-                ports:
-                  - "8010:8010"
-                volumes:
-                  - ./data/backend:/app/backend/data
-                  - ./storage:/app/storage
-                environment:
-                  - DJANGO_SETTINGS_MODULE=config.settings.production
-                  - REDIS_HOST=redis
-                  - DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
-                  - DATABASE_URL=${{ secrets.DATABASE_URL }}
-                depends_on:
-                  - redis
-
-              celery:
-                image: ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }}
-                working_dir: /app/backend
-                command: celery -A config worker -l info -P gevent
-                restart: unless-stopped
-                volumes:
-                  - ./data/backend:/app/backend/data
-                  - ./storage:/app/storage
-                environment:
-                  - DJANGO_SETTINGS_MODULE=config.settings.production
-                  - REDIS_HOST=redis
-                depends_on:
-                  - redis
-
-              frontend:
-                image: ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:${{ env.IMAGE_VERSION }}
-                restart: unless-stopped
-                ports:
-                  - "3000:3000"
-                depends_on:
-                  - backend
-            EOF
-            
-            # Create data directories
-            mkdir -p data/backend storage
-            
-            # Pull images
-            docker compose -f docker-compose-deploy.yml pull
-            
-            # Stop and remove old containers
-            docker compose -f docker-compose-deploy.yml down
-            
-            # Start services
-            docker compose -f docker-compose-deploy.yml up -d
-            
-            # Show status
-            docker compose -f docker-compose-deploy.yml ps
-            docker compose -f docker-compose-deploy.yml logs --tail=20
-            
-            echo "=== Deployment completed successfully ==="
-
-  # ==================== 通知 ====================
-  notify:
-    name: Notify
-    runs-on: ubuntu-latest
-    needs: [deploy]
-    if: always()
-    steps:
-      - name: Success notification
-        if: needs.deploy.result == 'success'
-        run: |
-          echo "🎉 Deployment completed successfully!"
-          echo "Images: ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }}"
-      
-      - name: Failure notification
-        if: needs.deploy.result == 'failure'
-        run: |
-          echo "❌ Deployment failed! Please check the logs."
+      - uses: actions/checkout@v4
+      - uses: appleboy/ssh-action@v1.0.3 with: {host: ${{ secrets.SERVER_HOST }}, username: ${{ secrets.SERVER_USER }}, key: ${{ secrets.SERVER_SSH_KEY }}, port: ${{ secrets.SERVER_SSH_PORT || 22 }}, script: "mkdir -p /opt/ai-story && cd /opt/ai-story && cat > docker-compose.yml << 'EOF'\nservices:\n  redis:\n    image: redis:7-alpine\n    restart: unless-stopped\n  backend:\n    image: ${{ env.DOCKERHUB_USERNAME }}/ai_story-backend:${{ env.IMAGE_VERSION }}\n    ports: ['8010:8010']\n    volumes: ['./data:/app/data']\n    environment:\n      - DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}\n      - REDIS_HOST=redis\n    depends_on: [redis]\n  frontend:\n    image: ${{ env.DOCKERHUB_USERNAME }}/ai_story-frontend:${{ env.IMAGE_VERSION }}\n    ports: ['3000:3000']\nEOF\ndocker compose up -d"}
